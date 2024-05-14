@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <p align="center">
 
   <h1 align="center">Gaussian Opacity Fields: Efficient and Compact Surface Reconstruction in Unbounded Scenes</h1>
@@ -110,3 +111,6 @@ If you find the regularizations useful, please kindly cite
   year={2024}
 }
 ```
+=======
+# exp_scfgof
+>>>>>>> 44ddc00aa63158d9b7348e2c95ac349639d8fb57

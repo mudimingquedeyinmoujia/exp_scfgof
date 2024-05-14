@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 *.pyc
 .vscode
 output
@@ -42,3 +43,11 @@ exp*
 eval_tnt/TrainingSet
 dtu_eval/Offical_DTU_Dataset
 __pycache__
+=======
+*.i
+*.ii
+*.gpu
+*.ptx
+*.cubin
+*.fatbin
+>>>>>>> 44ddc00aa63158d9b7348e2c95ac349639d8fb57
