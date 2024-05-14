@@ -2,8 +2,15 @@
 .vscode
 output
 build
+debug_history
+exp_360
+exp_gof_360
+datasets
+exp_depth_neural_360
 diff_rasterization/diff_rast.egg-info
 diff_rasterization/dist
+submodules
+filter_3Dversion
 tensorboard_3d
 screenshots
 nerf_synthetic

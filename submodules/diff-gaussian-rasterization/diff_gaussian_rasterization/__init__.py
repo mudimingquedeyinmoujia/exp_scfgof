@@ -303,3 +303,31 @@ class GaussianRasterizer(nn.Module):
             num_rendered, color, alpha_integrated, color_integrated, radii, geomBuffer, binningBuffer, imgBuffer = _C.integrate_gaussians_to_points(*args)
 
         return color, alpha_integrated, color_integrated, radii
+
+    def visible_filter(self, means3D, scales=None, rotations=None, cov3D_precomp=None):
+
+        raster_settings = self.raster_settings
+
+        if scales is None:
+            scales = torch.Tensor([])
+        if rotations is None:
+            rotations = torch.Tensor([])
+        if cov3D_precomp is None:
+            cov3D_precomp = torch.Tensor([])
+
+        # Invoke C++/CUDA rasterization routine
+        with torch.no_grad():
+            radii = _C.rasterize_gaussians_filter(means3D,
+                                                 scales,
+                                                 rotations,
+                                                 raster_settings.scale_modifier,
+                                                 cov3D_precomp,
+                                                 raster_settings.viewmatrix,
+                                                 raster_settings.projmatrix,
+                                                 raster_settings.tanfovx,
+                                                 raster_settings.tanfovy,
+                                                 raster_settings.image_height,
+                                                 raster_settings.image_width,
+                                                 raster_settings.prefiltered,
+                                                 raster_settings.debug)
+        return radii

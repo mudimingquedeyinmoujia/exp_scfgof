@@ -15,6 +15,8 @@
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
 
+__device__ __constant__ float pi = 3.14159265358979323846f;
+
 // Forward method for converting the input spherical harmonics
 // coefficients of each Gaussian to a simple RGB color.
 __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* shs, bool* clamped)
@@ -68,6 +70,47 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 	clamped[3 * idx + 1] = (result.y < 0);
 	clamped[3 * idx + 2] = (result.z < 0);
 	return glm::max(result, 0.0f);
+}
+
+__device__ float3 computeCov2DOri(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const float* viewmatrix)
+{
+	// The following models the steps outlined by equations 29
+	// and 31 in "EWA Splatting" (Zwicker et al., 2002).
+	// Additionally considers aspect / scaling of viewport.
+	// Transposes used to account for row-/column-major conventions.
+	float3 t = transformPoint4x3(mean, viewmatrix);
+
+	const float limx = 1.3f * tan_fovx;
+	const float limy = 1.3f * tan_fovy;
+	const float txtz = t.x / t.z;
+	const float tytz = t.y / t.z;
+	t.x = min(limx, max(-limx, txtz)) * t.z;
+	t.y = min(limy, max(-limy, tytz)) * t.z;
+
+	glm::mat3 J = glm::mat3(
+		focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
+		0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
+		0, 0, 0);
+
+	glm::mat3 W = glm::mat3(
+		viewmatrix[0], viewmatrix[4], viewmatrix[8],
+		viewmatrix[1], viewmatrix[5], viewmatrix[9],
+		viewmatrix[2], viewmatrix[6], viewmatrix[10]);
+
+	glm::mat3 T = W * J;
+
+	glm::mat3 Vrk = glm::mat3(
+		cov3D[0], cov3D[1], cov3D[2],
+		cov3D[1], cov3D[3], cov3D[4],
+		cov3D[2], cov3D[4], cov3D[5]);
+
+	glm::mat3 cov = glm::transpose(T) * glm::transpose(Vrk) * T;
+
+	// Apply low-pass filter: every Gaussian should be at least
+	// one pixel wide/high. Discard 3rd row and column.
+	cov[0][0] += 0.3f;
+	cov[1][1] += 0.3f;
+	return { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]) };
 }
 
 // Forward version of 2D covariance matrix computation
@@ -394,6 +437,85 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		view2gaussian = view2gaussian_precomp + idx * 16;
 	}
 }
+
+// Perform initial steps for each Gaussian prior to rasterization.
+template<int C>
+__global__ void filter_preprocessCUDA(int P, int M,
+	const float* orig_points,
+	const glm::vec3* scales,
+	const float scale_modifier,
+	const glm::vec4* rotations,
+	const float* cov3D_precomp,
+	const float* viewmatrix,
+	const float* projmatrix,
+	const int W, int H,
+	const float tan_fovx, float tan_fovy,
+	const float focal_x, float focal_y,
+	int* radii,
+	float* cov3Ds,
+	const dim3 grid,
+	bool prefiltered)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= P)
+		return;
+
+	// Initialize radius and touched tiles to 0. If this isn't changed,
+	// this Gaussian will not be processed further.
+	radii[idx] = 0;
+
+	// Perform near culling, quit if outside.
+	float3 p_view;
+	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view))
+		return;
+
+	// Transform point by projecting
+	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
+	float4 p_hom = transformPoint4x4(p_orig, projmatrix);
+	float p_w = 1.0f / (p_hom.w + 0.0000001f);
+	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
+
+	// If 3D covariance matrix is precomputed, use it, otherwise compute
+	// from scaling and rotation parameters.
+	const float* cov3D;
+	if (cov3D_precomp != nullptr)
+	{
+		cov3D = cov3D_precomp + idx * 6;
+	}
+	else
+	{
+		computeCov3D(scales[idx], scale_modifier, rotations[idx], cov3Ds + idx * 6);
+		cov3D = cov3Ds + idx * 6;
+	}
+
+	// Compute 2D screen-space covariance matrix
+	float3 cov = computeCov2DOri(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
+
+	// Invert covariance (EWA algorithm)
+	float det = (cov.x * cov.z - cov.y * cov.y);
+	if (det == 0.0f)
+		return;
+
+
+	// Compute extent in screen space (by finding eigenvalues of
+	// 2D covariance matrix). Use extent to compute a bounding rectangle
+	// of screen-space tiles that this Gaussian overlaps with. Quit if
+	// rectangle covers 0 tiles.
+	float mid = 0.5f * (cov.x + cov.z);
+	float lambda1 = mid + sqrt(max(0.1f, mid * mid - det));
+	float lambda2 = mid - sqrt(max(0.1f, mid * mid - det));
+	float my_radius = ceil(3.f * sqrt(max(lambda1, lambda2)));
+	float2 point_image = { ndc2Pix(p_proj.x, W), ndc2Pix(p_proj.y, H) };
+	uint2 rect_min, rect_max;
+	getRect(point_image, my_radius, rect_min, rect_max, grid);
+	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0)
+		return;
+
+
+	radii[idx] = my_radius;
+
+}
+
 
 // Main rasterization method. Collaboratively works on one tile per
 // block, each thread treats one pixel. Alternates between fetching 
@@ -738,6 +860,8 @@ void FORWARD::preprocess(int P, int D, int M,
 		prefiltered
 		);
 }
+
+
 
 // Perform initial steps for each Gaussian prior to rasterization.
 template<int C>
@@ -1315,4 +1439,40 @@ void FORWARD::integrate(
 		out_color,
 		out_alpha_integrated,
 		out_color_integrated);
+}
+
+void FORWARD::filter_preprocess(int P, int M,
+	const float* means3D,
+	const glm::vec3* scales,
+	const float scale_modifier,
+	const glm::vec4* rotations,
+	const float* cov3D_precomp,
+	const float* viewmatrix,
+	const float* projmatrix,
+	const int W, int H,
+	const float focal_x, float focal_y,
+	const float tan_fovx, float tan_fovy,
+	int* radii,
+	float* cov3Ds,
+	const dim3 grid,
+	bool prefiltered)
+{
+
+	filter_preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256 >> > (
+		P, M,
+		means3D,
+		scales,
+		scale_modifier,
+		rotations,
+		cov3D_precomp,
+		viewmatrix,
+		projmatrix,
+		W, H,
+		tan_fovx, tan_fovy,
+		focal_x, focal_y,
+		radii,
+		cov3Ds,
+		grid,
+		prefiltered
+		);
 }

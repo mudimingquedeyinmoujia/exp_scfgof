@@ -13,11 +13,13 @@ from argparse import ArgumentParser, Namespace
 import sys
 import os
 
+
 class GroupParams:
     pass
 
+
 class ParamGroup:
-    def __init__(self, parser: ArgumentParser, name : str, fill_none = False):
+    def __init__(self, parser: ArgumentParser, name: str, fill_none=False):
         group = parser.add_argument_group(name)
         for key, value in vars(self).items():
             shorthand = False
@@ -25,7 +27,7 @@ class ParamGroup:
                 shorthand = True
                 key = key[1:]
             t = type(value)
-            value = value if not fill_none else None 
+            value = value if not fill_none else None
             if shorthand:
                 if t == bool:
                     group.add_argument("--" + key, ("-" + key[0:1]), default=value, action="store_true")
@@ -44,7 +46,8 @@ class ParamGroup:
                 setattr(group, arg[0], arg[1])
         return group
 
-class ModelParams(ParamGroup): 
+
+class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
         self.sh_degree = 3
         self._source_path = ""
@@ -61,12 +64,31 @@ class ModelParams(ParamGroup):
         self.load_allres = False
         self.sample_more_highres = False
         self.use_decoupled_appearance = False
+        # new add for scaffod GS
+        self.feat_dim = 32
+        self.n_offsets = 10
+        self.voxel_size = 0.001  # if voxel_size<=0, using 1nn dist
+        self.update_depth = 3
+        self.update_init_factor = 16
+        self.update_hierachy_factor = 4
+        self.use_feat_bank = False
+        self.use_kernel_mlp = False
+        self.appearance_dim = 32
+        self.lowpoly = False
+        self.ds = 1
+        self.ratio = 1  # sampling the input point cloud
+        self.undistorted = False
+        self.add_opacity_dist = False  # no use
+        self.add_cov_dist = False
+        self.add_color_dist = False
+
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
         g = super().extract(args)
         g.source_path = os.path.abspath(g.source_path)
         return g
+
 
 class PipelineParams(ParamGroup):
     def __init__(self, parser):
@@ -76,17 +98,14 @@ class PipelineParams(ParamGroup):
         self.debug = False
         super().__init__(parser, "Pipeline Parameters")
 
+
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         self.iterations = 30_000
-        self.position_lr_init = 0.00016
-        self.position_lr_final = 0.0000016
+
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
-        self.feature_lr = 0.0025
-        self.opacity_lr = 0.05
-        self.scaling_lr = 0.005
-        self.rotation_lr = 0.001
+
         self.appearance_embeddings_lr = 0.001
         self.appearance_network_lr = 0.001
         self.percent_dense = 0.01
@@ -100,9 +119,87 @@ class OptimizationParams(ParamGroup):
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
+        ################
+        ### modify origin
+        # self.position_lr_init = 0.00016
+        # self.position_lr_final = 0.0000016
+        self.position_lr_init = 0.0
+        self.position_lr_final = 0.0
+
+        # self.feature_lr = 0.0025
+        # self.opacity_lr = 0.05
+        # self.scaling_lr = 0.005
+        # self.rotation_lr = 0.001
+        self.feature_lr = 0.0075
+        self.opacity_lr = 0.0  # ori 0.02
+        self.scaling_lr = 0.0007  # 0.007
+        self.rotation_lr = 0.0  # ori 0.002
+
+        ################
+        ### scaffod GS new add
+
+        self.sample_sdf_num = 1000
+        self.sample_sdf_scale = 1.0
+
+        self.loss_sdf_start = 200
+        self.loss_sdf_interval = 1
+        self.n_sample_sdf = 10000
+        self.weight_sdf = 0.001
+
+        self.kernel_num = 5
+        self.save_images_interval = 200
+
+        self.offset_lr_init = 0.01
+        self.offset_lr_final = 0.0001
+        self.offset_lr_delay_mult = 0.01
+        self.offset_lr_max_steps = 30_000
+
+        self.mlp_opacity_lr_init = 0.002
+        self.mlp_opacity_lr_final = 0.00002
+        self.mlp_opacity_lr_delay_mult = 0.01
+        self.mlp_opacity_lr_max_steps = 30_000
+
+        self.mlp_cov_lr_init = 0.0004  # 0.004
+        self.mlp_cov_lr_final = 0.00002  # 0.004
+        self.mlp_cov_lr_delay_mult = 0.01
+        self.mlp_cov_lr_max_steps = 30_000
+
+        self.mlp_color_lr_init = 0.008
+        self.mlp_color_lr_final = 0.00005
+        self.mlp_color_lr_delay_mult = 0.01
+        self.mlp_color_lr_max_steps = 30_000
+
+        self.mlp_color_lr_init = 0.008
+        self.mlp_color_lr_final = 0.00005
+        self.mlp_color_lr_delay_mult = 0.01
+        self.mlp_color_lr_max_steps = 30_000
+
+        self.mlp_kernel_sdf_lr_init = 0.008
+        self.mlp_kernel_sdf_lr_final = 0.00005
+        self.mlp_kernel_sdf_lr_delay_mult = 0.01
+        self.mlp_kernel_sdf_lr_max_steps = 30_000
+
+        self.mlp_featurebank_lr_init = 0.01
+        self.mlp_featurebank_lr_final = 0.00001
+        self.mlp_featurebank_lr_delay_mult = 0.01
+        self.mlp_featurebank_lr_max_steps = 30_000
+
+        self.appearance_lr_init = 0.05
+        self.appearance_lr_final = 0.0005
+        self.appearance_lr_delay_mult = 0.01
+        self.appearance_lr_max_steps = 30_000
+        # for anchor densification
+        self.start_stat = 500
+        self.update_from = 1500
+        self.update_interval = 100
+        self.update_until = 15_000
+
+        self.min_opacity = 0.005
+        self.success_threshold = 0.8
         super().__init__(parser, "Optimization Parameters")
 
-def get_combined_args(parser : ArgumentParser):
+
+def get_combined_args(parser: ArgumentParser):
     cmdlne_string = sys.argv[1:]
     cfgfile_string = "Namespace()"
     args_cmdline = parser.parse_args(cmdlne_string)
@@ -119,7 +216,7 @@ def get_combined_args(parser : ArgumentParser):
     args_cfgfile = eval(cfgfile_string)
 
     merged_dict = vars(args_cfgfile).copy()
-    for k,v in vars(args_cmdline).items():
+    for k, v in vars(args_cmdline).items():
         if v != None:
             merged_dict[k] = v
     return Namespace(**merged_dict)
